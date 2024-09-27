@@ -1,0 +1,4 @@
+# Virtual environment
+machinelearningenv/
+*.pyc
+__pycache__/
