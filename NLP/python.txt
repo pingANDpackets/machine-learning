@@ -1,0 +1,613 @@
+# Install Dependencies before Proceeding
+%pip install chardet
+%pip install pandas
+%pip install numpy
+%pip install langchain==0.2.12
+%pip install faiss-cpu==1.8.0.post1
+%pip install langchain-community==0.2.11
+%pip install openai==1.40.2
+%pip install azure-storage-blob
+%pip install openpyxl
+%pip install tiktoken==0.7.0
+
+# Restart the kernel
+dbutils.library.restartPython()
+
+
+import chardet
+import re
+import pandas as pd
+import numpy as np
+import time
+import gc
+import os
+import io
+import openpyxl
+import tiktoken
+import openai
+import requests
+import json
+import math
+
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
+from langchain.embeddings.openai import OpenAIEmbeddings 
+from langchain.vectorstores import FAISS 
+from langchain.document_loaders import DataFrameLoader 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
+from datetime import datetime
+from collections import defaultdict
+from azure.storage.blob import BlobServiceClient
+from openai import AzureOpenAI
+
+
+
+
+openai.api_key = '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'  
+os.environ["OPENAI_API_KEY"] = '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'
+
+
+# Azure OpenAI settings
+azure_endpoint = "https://kpsgptworkbench.openai.azure.com/"
+api_key = "072aafdb776f409f984327d78bda076b"
+api_version = "2024-02-01"
+deployment_name = "text-embedding-ada-002"  # Replace with your actual deployment name for embeddings
+
+
+
+# Define a function to interact with Azure OpenAI API
+def get_azure_embeddings(texts):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    data = {
+        "input": texts,
+        "model": deployment_name
+    }
+    response = requests.post(
+        f"{azure_endpoint}/v1/embeddings",
+        headers=headers,
+        data=json.dumps(data)
+    )
+    if response.status_code == 200:
+        result = response.json()
+        return [embedding['embedding'] for embedding in result['data']]
+    else:
+        raise Exception(f"Error: {response.status_code}, {response.text}")
+
+# Initialize LangChain's OpenAIEmbeddings with a dummy implementation
+class AzureOpenAIEmbeddings(OpenAIEmbeddings):
+    def embed_texts(self, texts):
+        return get_azure_embeddings(texts)
+
+# Initialize the Azure OpenAI Embeddings
+embeddings = AzureOpenAIEmbeddings()
+
+
+
+# Azure OpenAI initializations
+os.environ["AZURE_OPENAI_ENDPOINT"] = "https://kpsgpt4omini.openai.azure.com/"
+os.environ["OpenAPIKey"] = "58cf907a800a44f6affaaa97ccb1e34d"
+os.environ["OPENAI_API_VERSION"] = "2024-02-01"
+deployment_name = 'kpsgpt4omini'
+
+# Initialize the Azure OpenAI client
+AzureClient = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    api_key=os.environ["OpenAPIKey"],
+    api_version=os.environ["OPENAI_API_VERSION"]
+)
+
+
+container_name = 'genaicode'
+AZURE_STORAGE_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=kpsgptstorageaccount;AccountKey=623nQjidBaZTQgtvlaqG3DJB6JeNV3jvjTcfrlgCL7SVUrMO28o+uyCWMKApqnxd6jmjo0l/c8RR+ASt4agAfA==;EndpointSuffix=core.windows.net"
+
+
+
+# input_folder = 'LineItemCategorization/abalda01@atkearney.com/Input/Spend Sheet/last_10k.xlsx'
+# taxonomy_folder = 'LineItemCategorization/abalda01@atkearney.com/Input/Taxonomy/Taxonomy_For run.xlsx'
+# output_folder = 'LineItemCategorization/abalda01@atkearney.com/output'
+# email = 'abalda01@atkearney.com'
+
+# # Define parameters using dbutils.widgets
+dbutils.widgets.text("email", "")
+dbutils.widgets.text("input_folder", "")
+dbutils.widgets.text("taxonomy_folder", "")
+
+# # Retrieve the parameters
+email = dbutils.widgets.get("email")
+input_folder = dbutils.widgets.get("input_folder")
+taxonomy_folder = dbutils.widgets.get("taxonomy_folder")
+
+output_folder = f'LineItemCategorization/{email}/output'
+blob_json_path = f'LineItemCategorization/{email}/process/process.json'
+
+
+# Initialize the BlobServiceClient-
+blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+
+
+
+# Function to download blob content as a dataframe
+def download_blob_as_dataframe(blob_service_client, container_name, blob_name):    
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+    stream = io.BytesIO()
+    blob_client.download_blob().readinto(stream)
+    stream.seek(0)
+    df = pd.read_excel(stream)
+    return df
+
+# Function to upload a dataframe as a blob
+def upload_dataframe_as_blob(blob_service_client, container_name, blob_name, df):
+    print('inside upload dataframe')
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+    output = io.BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
+    blob_client.upload_blob(output, overwrite=True)
+    print('dataframe uploaded')
+
+
+
+
+ # Function to read the current JSON from Blob Storage
+def read_process_status():
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_json_path)
+    downloaded_blob = blob_client.download_blob().readall()
+    return json.loads(downloaded_blob)
+
+# Function to update the process step in the JSON file
+def update_process_step(step_description):
+    process_status = read_process_status()
+
+    # Iterate through the steps in process_status to find the matching description
+    for step in process_status['process_status']:
+        if step['description'] == step_description:
+            # Update the specific step to completed
+            step['completed'] = True
+            print(f"{step_description} completed and updated in process status.")
+
+    # Re-upload the updated JSON
+    updated_json = json.dumps(process_status)
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_json_path)
+    blob_client.upload_blob(updated_json, overwrite=True)
+    print(f"Updated process status uploaded to Blob.")
+
+
+
+
+    # Main function to process data
+def process_data(input_folder, taxonomy_folder, folder_path_output, connection_string, container_name):
+
+    # Download input data from blob storage
+    spend_sheet = download_blob_as_dataframe(blob_service_client, container_name, f"{input_folder}")
+
+    category_tree = download_blob_as_dataframe(blob_service_client, container_name, f"{taxonomy_folder}")
+    category_tree = category_tree.drop_duplicates()
+    
+    itemdesc = 'Material Description'
+    batch_size = 1000.0
+    path_to_categorised_files = r"\batch_saving"
+    directory_name = 'Temp_Categorizations'    
+
+    # Creating a new directory 'CurrentDate_AccountName'
+    date = datetime.today().strftime('%d-%m-%Y_%H:%M:%S')
+
+    update_process_step('Reading Spend file')
+    update_process_step('Reading taxonomy file')
+
+    # Print statements to cross check inputs
+    '''Taxonomy Preprocessing Block
+    This is useful when taxonomy doesn't have equal number of values across all rows 
+    (eg: some rows do not have L3 values and might only have L2 or L1 values)
+    '''
+
+    """Taxonomy Indexing"""
+
+    # Get the last valid element in each row of the taxonomy
+    category_tree_preprocessed_l3 = []
+    for index, row in category_tree.iterrows():
+        # Find the last non-null value in the row
+        last_non_null_value = row.last_valid_index()
+        # Append the last non-null value to the list if 'other' doesn't exist in the value
+        if 'other' not in str(row[last_non_null_value]).lower():
+            category_tree_preprocessed_l3.append(row[last_non_null_value].lower())
+
+    category_tree_preprocessed_l3 = list(set(category_tree_preprocessed_l3))
+    taxonomy_list =  category_tree_preprocessed_l3
+    category_tree_preprocessed_l3 = list(set(taxonomy_list))
+    category_tree_preprocessed = pd.DataFrame(columns=['L3'])
+    category_tree_preprocessed['L3'] = category_tree_preprocessed_l3
+
+    embeddings = OpenAIEmbeddings() # creates the embedding variable to be used for embedding
+    loader = DataFrameLoader(category_tree_preprocessed, page_content_column="L3") # loads the dataframe in this way {source: file name, page_content_column: descriptions of the file}
+    taxonomy = []
+    taxonomy.extend(loader.load_and_split()) # loads the files and splits it along a list with one page containing one row's contents
+    indexed_taxonomy_described_cleaned = FAISS.from_documents(taxonomy, embeddings) # indexes the pages into the FAISS in-memory indexer
+
+    ''' Adds four new columns ('StringMatching-L3', 'GPT-L3', 'GPT-Confidence', 'Categorisation') to the 'spend_sheet_categorized' dataframe.
+    The newly added columns are initialized with 0 for each row in the dataframe.'''
+
+    spend_sheet['GPT_Return_Json'] = 0
+    spend_sheet['Categorisation'] = 0
+    spend_sheet[itemdesc] = spend_sheet[itemdesc].astype(str).replace({'nan': np.nan, '': np.nan})
+
+    update_process_step('Fetching material description and L1, L2 & L3 categories')
+
+    # Function to normalize values and clean item descriptions
+    def normalize_and_clean(item):
+        pattern = r'[^a-zA-Z\s]'
+        normalized = re.sub(pattern, '', str(item))
+        normalized = normalized.lower()
+        normalized = normalized.replace('\n', '').replace('\t', '').strip()
+        if normalized == '':
+            normalized = np.nan
+        return normalized
+
+    # Convert the item descriptions column to a set to remove duplicates
+    unique_itemdescs = set(spend_sheet[itemdesc].tolist())
+    unique_itemdescs_cleaned = []
+    # Use a defaultdict to store mappings
+    normalised_values_to_items = defaultdict(list)
+    items_to_normalised_values = {}
+
+    # Normalize and clean the unique item descriptions
+    for item in unique_itemdescs:
+        normalized_item = normalize_and_clean(item)
+        unique_itemdescs_cleaned.append(normalized_item)
+        normalised_values_to_items[normalized_item].append(item)
+        items_to_normalised_values[item] = normalized_item
+
+    # Create a new column in the DataFrame with normalized item descriptions
+    spend_sheet['Normalized_Item'] = [normalize_and_clean(item) for item in spend_sheet[itemdesc].tolist()]
+
+    item_description_logs = pd.DataFrame()
+    
+    item_description_logs['Item'] = spend_sheet[itemdesc]
+    item_description_logs = item_description_logs.drop_duplicates()
+    item_description_logs['Normalized_Item'] = [normalize_and_clean(item) for item in item_description_logs['Item'].tolist()]
+
+    spend_sheet_uniques = spend_sheet.copy()
+    spend_sheet_uniques = spend_sheet_uniques.dropna(subset='Normalized_Item')
+    spend_sheet_uniques = spend_sheet_uniques.drop_duplicates(subset='Normalized_Item')
+
+    update_process_step('Cleaning and normalizing the material descriptions')
+
+    def get_mapping_gpt_v5_comments(row, target_list):
+
+        max_retries = 5
+        target_list = str(target_list)
+        for retry in range(max_retries):
+            try:
+                response = AzureClient.chat.completions.create(
+                    model=deployment_name,
+                    temperature=0,
+                    messages=[{"role": "system", "content": f"""You are a Sourcing and Procurement Expert.
+    You are tasked with categorizing PO Text and providing your reasoning for why you have categorized the PO Text in that way.
+    You should give me Categorization (Only from provided list only), Bucket (Sure, Not Sure), and Reasoning (1 sentence long)
+
+    ONLY MATCH WITH THIS LIST: {target_list}
+
+    Rules:
+    1.If an exact match doesn't exist, select the closest match based on the row's content or context. Only match with the provided list.
+    2.Use your understanding and analytical skills to best align the row with a suitable category.
+    3.Your reasoning should ONLY be 1 SENTENCE LONG. Your bucket should only be Sure, Not Sure.
+    4. DO NOT provide me any other characters other than the expected output.
+
+    Your expected output:
+
+    'Categorization: [closest matching category from provided list]
+    Bucket: [Sure, Not Sure]
+    Reasoning: [1 sentence reasoning for why that category was chosen]'"""},
+                            {"role": "user", "content": f"""Find the closest matching category for each row and output the categorization and reasoning in the EXPECTED FORMAT ONLY. Do not add any other characters apart from the expected format."{row}"
+    """}]
+                )
+                return response
+            except Exception as e:
+                response = e
+                print(f"For {row}: {e}, Timeout occurred for attempt {retry + 1}...")
+        
+        return response  # Return None if all retries fail
+
+    '''
+    Block to batch process rows.
+    The core function in this code, 'process_row', is defined to process individual rows of data.
+    Each row is processed by constructing a string 'r' based on the row's data, where information from different columns is concatenated in a specific format. 
+    This string 'r' is then used as input for GPT-3 gpt, with attempts made up to two times to obtain a valid response.
+    The code defines paths to save several output files, including batch categorization results and categorized unique item descriptions. 
+    It employs a ThreadPoolExecutor with a specified number of threads (in this case, four) to parallelize the row processing. 
+    Each batch of rows is submitted for concurrent execution using the 'process_row' function, and the results are collected.
+    '''
+
+    def process_row(row):
+        formatted_itemdesc = "Description: " + str(row[itemdesc])
+        print('formatted_itemdesc', formatted_itemdesc)
+        l3_gpt_completion = None
+        j = 0
+        lvl3_subsection_main = [] 
+        error_message = None  # To store the actual error message if any
+
+        # Attempt GPT-3.5 Turbo completion up to 2 times
+        while l3_gpt_completion is None and j < 2:
+            j += 1
+
+            docs = indexed_taxonomy_described_cleaned.max_marginal_relevance_search(formatted_itemdesc, 10)
+            docs2 = indexed_taxonomy_described_cleaned.similarity_search(formatted_itemdesc, 10)
+            uniquelvl3_subsection = [doc.page_content for doc in docs]
+            uniquelvl3_subsection2 = [doc.page_content for doc in docs2]
+            uniquelvl3_subsection_vf = list(dict.fromkeys(uniquelvl3_subsection2 + uniquelvl3_subsection))
+
+            try:
+                l3_gpt_completion = get_mapping_gpt_v5_comments(formatted_itemdesc, uniquelvl3_subsection_vf)
+            except Exception as e:
+                error_message = f"Error in GPT completion for row {row}: {str(e)}"
+                break  # Exit the loop if there's an error, no need to retry
+
+            lvl3_subsection_main = uniquelvl3_subsection_vf
+        
+        # Try to extract the GPT categorization if it was successful
+        if l3_gpt_completion is not None:
+            try:
+                gpt_category = l3_gpt_completion.choices[0].message.content
+            except Exception as e:
+                gpt_category = f"Error extracting GPT categorization for row {row}: {l3_gpt_completion}"
+                print(error_message)
+
+        return_json = {
+            'GPT_Categorization': gpt_category if not error_message else error_message,
+            'Best_Matches': lvl3_subsection_main,
+            'Error_Message': error_message  # Pass the actual error message
+        }
+
+        return return_json
+    
+    # Name of the subfolder
+    subfolder_name_batch_files = "Batch Files"
+    subfolder_name_unique_itm = "Unique Items Categorized"
+    subfolder_name_final_cat = "Final Categorized File"
+
+    # Path to the subfolder
+    subfolder_path_batch_files = os.path.join(folder_path_output, subfolder_name_batch_files)
+    subfolder_path_unique_itm = os.path.join(folder_path_output, subfolder_name_unique_itm )
+    subfolder_path_final_cat = os.path.join(folder_path_output, subfolder_name_final_cat)
+
+    # Define paths to save output files
+    path_to_save_batch_files = os.path.join(subfolder_path_batch_files)
+    path_to_save_categorised_unique_itemdesc_file = os.path.join(subfolder_path_unique_itm,"Categorised (Unique Item Descriptions).csv")
+    path_to_save_l3_mapped_file = os.path.join(folder_path_output,"Categorised (Cleaned L3).xlsx")
+    categorised_file_name = str(date)+"_autocategorization_result.xlsx"
+    path_to_save_l1_3_mapped_file = os.path.join(subfolder_path_final_cat,categorised_file_name)
+
+    if batch_size > len(spend_sheet_uniques.index):
+        batch_size = len(spend_sheet_uniques.index)
+    batch_size = int(batch_size)
+
+    # Calculating number of batches
+    num_batches = (len(spend_sheet_uniques) + batch_size - 1) // batch_size
+
+    # Create a ThreadPoolExecutor with a specified number of threads
+    num_threads = 4  
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        for batch_idx in range(num_batches):
+            gc.collect()
+            start_idx = batch_idx * batch_size
+            end_idx = (batch_idx + 1) * batch_size
+            print(start_idx, end_idx)
+
+            # Submit tasks for processing in the batch
+            batch_results = list(executor.map(process_row, spend_sheet_uniques.iloc[start_idx:end_idx].to_dict(orient='records')))
+            
+            # Update the DataFrame with the batch results
+            spend_sheet_uniques.iloc[start_idx:end_idx, spend_sheet_uniques.columns.get_loc('GPT_Return_Json')] = batch_results
+            
+            # Save the batch to a CSV file
+            spend_sheet_uniques.iloc[start_idx:end_idx]
+            # output_blob_name = f"{path_to_save_batch_files}/Batch_Categorisation-{start_idx}-{end_idx}.xlsx"
+            # upload_dataframe_as_blob(blob_service_client, container_name, output_blob_name,spend_sheet_uniques)
+
+    # After processing all batches, you can save the entire DataFrame to a CSV if needed
+    upload_dataframe_as_blob(blob_service_client, container_name, path_to_save_categorised_unique_itemdesc_file,spend_sheet_uniques)
+
+    spend_sheet_uniques['Best_Matches'] = 0
+    spend_sheet_uniques['GPT_Categorization'] = 0
+
+    for index,row in spend_sheet_uniques.iterrows():
+        try:
+            spend_sheet_uniques.loc[index,'Best_Matches'] = str(row['GPT_Return_Json']['Best_Matches'])
+            spend_sheet_uniques.loc[index,'GPT_Categorization'] = str(row['GPT_Return_Json']['GPT_Categorization'])
+        except Exception as e:
+            print(index,"didnt work for",row['Item_Description'],"for",e)
+
+    spend_sheet['GPT_Categorization'] = spend_sheet['Normalized_Item'].map(spend_sheet_uniques.set_index('Normalized_Item')['GPT_Categorization'])
+    spend_sheet['GPT_Categorization_Cleaned'] = spend_sheet['GPT_Categorization'].str.strip("['']")
+
+    # Function to extract Bucket and Comment
+    def extract_bucket_and_comment(text):
+        try:
+            categorization_match = re.search(r'Categorization: (.*?)\n', text)
+            confidence_match = re.search(r'Bucket: (.*)\n', text)
+            reasoning_match = re.search(r'Reasoning: (.*)', text)            
+            categorization = categorization_match.group(1) if categorization_match else None
+            confidence = confidence_match.group(1) if confidence_match else None
+            reasoning = reasoning_match.group(1) if reasoning_match else None
+            return categorization, confidence, reasoning
+        except:
+            return 0, 0, 0
+
+    # Apply function to each row and create new columns
+    spend_sheet[['Categorization', 'Confidence', 'Reasoning']] = spend_sheet['GPT_Categorization_Cleaned'].apply(lambda x: pd.Series(extract_bucket_and_comment(x)))
+    
+    item_description_logs['GPT_Categorization'] = item_description_logs['Normalized_Item'].map(spend_sheet_uniques.set_index('Normalized_Item')['GPT_Categorization'])
+    item_description_logs['Best_Matches'] = item_description_logs['Normalized_Item'].map(spend_sheet_uniques.set_index('Normalized_Item')['Best_Matches'])
+    item_description_logs['GPT_Categorization_Cleaned'] = item_description_logs['GPT_Categorization'].str.strip("['']")
+
+    # Apply function to each row and create new columns
+    item_description_logs[['Categorization', 'Confidence', 'Reasoning']] = item_description_logs['GPT_Categorization_Cleaned'].apply(lambda x: pd.Series(extract_bucket_and_comment(x)))
+
+    for col in ['Categorization', 'Confidence', 'Reasoning']:
+        item_description_logs[col] = item_description_logs[col].str.strip()
+        spend_sheet[col] = spend_sheet[col].str.strip()
+
+    '''Block to map categorisation values to base values in the taxonomy'''
+    # Reindexing taxonomy with original/unprocessed L3 values
+    category_tree_preprocessed_l3 = []
+    for index, row in category_tree.iterrows():
+        # Find the last non-null value in the row
+        last_non_null_value = row.last_valid_index()
+
+        # Append the last non-null value to the list
+        category_tree_preprocessed_l3.append(row[last_non_null_value])
+    category_tree_preprocessed_l3 = list(set(category_tree_preprocessed_l3))
+
+    category_tree_preprocessed = pd.DataFrame(columns=['L3'])
+    category_tree_preprocessed['L3'] = category_tree_preprocessed_l3
+
+    embeddings = OpenAIEmbeddings() # creates the embedding variable to be used for embedding
+    loader = DataFrameLoader(category_tree_preprocessed, page_content_column="L3") # loads the dataframe in this way {source: file name, page_content_column: descriptions of the file}
+    taxonomy = []
+    taxonomy.extend(loader.load_and_split()) # loads the files and splits it along a list with one page containing one row's contents
+    indexed_taxonomy = FAISS.from_documents(taxonomy, embeddings) # indexes the pages into the FAISS in-memory indexer
+
+    categorisation = list(spend_sheet['Categorization'].unique())
+    categorisation_to_taxonomy_map = {}
+    for category in categorisation:
+        try:
+            categorisation_to_taxonomy_map[category] = indexed_taxonomy.similarity_search(category,4)[0].page_content
+        except:
+            print(category)
+    categorisation_to_taxonomy_map["nan"] = np.nan
+
+    update_process_step('Doing Similarity search & using GPT 4o to map descriptions to category')
+    
+    # Create a new column with NaN as the default value
+    spend_sheet['L3'] = "nan"
+    # Use the map method to replace values based on the dictionary
+    spend_sheet['L3'] = spend_sheet['Categorization'].map(categorisation_to_taxonomy_map)
+
+    item_description_logs['L3'] = item_description_logs['Categorization'].map(categorisation_to_taxonomy_map)
+
+    # Removing irrelevant columns
+    columns_to_drop = [ 'Categorisation', 'Normalized_Item',
+    'GPT_Return_Json', 'GPT_Categorization', 'GPT_Categorization_Cleaned',
+    'Categorization']
+    spend_sheet = spend_sheet.drop(columns=columns_to_drop)
+
+    '''Block to map L1, L2 values from taxonomy to L3 values in spend sheet'''
+
+    # spend_sheet_categorised_clean = spend_sheet_categorised_clean.copy()
+
+    for col in ['L1','L2','L3']:
+        category_tree[col] = category_tree[col].astype(str).str.strip().replace({"nan":np.nan})
+
+    last_non_null_value_to_levels = {}
+    for index, row in category_tree.iterrows():
+        last_non_null_value = row.last_valid_index()
+        
+        if str(last_non_null_value) == 'L3' or str(last_non_null_value) == 'L2':
+            last_non_null_value_to_levels[row[last_non_null_value]] = [row['L1'],row['L2']]
+        else:
+            last_non_null_value_to_levels[row[last_non_null_value]] = [row['L1'],row['L1']]
+
+    def map_levels(categorization):
+        levels = last_non_null_value_to_levels.get(categorization)
+        if levels:
+            if len(levels) == 2 or len(levels) == 1:
+                return levels[1], levels[0]
+        return categorization, categorization
+
+    level_2, level_1 = zip(*spend_sheet['L3'].apply(map_levels))
+    spend_sheet['L2'] = level_2
+    spend_sheet['L1'] = level_1
+
+    # Get the names of all columns except the last three
+    first_columns = spend_sheet.columns[:-3]
+
+    # Get the names of the last three columns
+    last_columns = spend_sheet.columns[-3:][::-1]
+
+    # Concatenate the columns in the desired order
+    new_order = list(first_columns) + list(last_columns)
+
+    # Rearrange the columns based on the new order
+    spend_sheet = spend_sheet[new_order]
+    level_2, level_1 = zip(*item_description_logs['L3'].apply(map_levels))
+    item_description_logs['L2'] = level_2
+    item_description_logs['L1'] = level_1
+
+    # Get the names of all columns except the last three
+    first_columns = item_description_logs.columns[:-3]
+
+    # Get the names of the last three columns
+    last_columns = item_description_logs.columns[-3:][::-1]
+
+    # Concatenate the columns in the desired order
+    new_order = list(first_columns) + list(last_columns)
+
+    # Rearrange the columns based on the new order
+    item_description_logs = item_description_logs[new_order]
+    
+    output_blob_name = f"{path_to_save_l1_3_mapped_file}"
+    upload_dataframe_as_blob(blob_service_client, container_name, output_blob_name,spend_sheet)
+
+    # Below logic is to add log files to the linecategorization
+    
+    logs_path = 'logs/LineCategorization/'
+    user_name = email.split('@')[0]
+
+    # Add the new columns at the start of log file
+    item_description_logs.insert(0, 'user_name', user_name)
+    item_description_logs.insert(1, 'timestamp', str(date))
+
+    categorised_file_name = f"{user_name}_autocategorization_logs.xlsx"
+    path_to_save_item_log = os.path.join(logs_path, categorised_file_name)
+
+    try:
+        existing_data = download_blob_as_dataframe(blob_service_client, container_name, path_to_save_item_log)
+        updated_data = pd.concat([existing_data, item_description_logs], ignore_index=True)
+    except:
+        # If the file doesn't exist, use the new data as the file
+        updated_data = item_description_logs
+
+    upload_dataframe_as_blob(blob_service_client, container_name, path_to_save_item_log, updated_data)
+    update_process_step('Formatting the output response')
+    
+    return output_blob_name
+
+
+
+print(input_folder)
+print(taxonomy_folder)
+print(output_folder)
+
+container_path =  'https://kpsgptstorageaccount.blob.core.windows.net/genaicode/'
+input_file = os.path.join(container_path, input_folder)
+taxonomy_file = os.path.join(container_path, taxonomy_folder) if taxonomy_folder else None
+
+dbutils.jobs.taskValues.set("input_spend_sheet", input_file)
+dbutils.jobs.taskValues.set("input_taxonomy_sheet", taxonomy_file)
+dbutils.jobs.taskValues.set("email", email)
+dbutils.jobs.taskValues.set("job_name", 'Line Item Categorization')
+
+try:
+    # Run the actual process_data function
+    output_blob_name = process_data(input_folder, taxonomy_folder, output_folder, AZURE_STORAGE_CONNECTION_STRING, container_name)
+
+    # Set the success status and output blob name for the next task
+    # Assume these variables are generated in your job
+    container_path =  'https://kpsgptstorageaccount.blob.core.windows.net/genaicode/'
+    job_name = 'Line Item Categorization'
+    dbutils.jobs.taskValues.set("status", "success")
+    output_file = os.path.join(container_path, output_blob_name)
+    print('output_file', output_file)
+    dbutils.jobs.taskValues.set("output_sheet", output_file)
+except Exception as e:
+    print(str(e))
+    dbutils.jobs.taskValues.set("status", "failure")
+    dbutils.jobs.taskValues.set("error_message", str(e))
+    dbutils.jobs.taskValues.set("output_sheet", None)
+
+
+    
+
