@@ -1,0 +1,4 @@
+# Virtual environment
+langchainenv/
+*.pyc
+__pycache__/
