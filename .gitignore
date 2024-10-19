@@ -2,3 +2,5 @@
 machinelearningenv/
 *.pyc
 __pycache__/
+langchainenv/
+.env
