@@ -1,6 +1,5 @@
-# Virtual environment
-machinelearningenv/
-*.pyc
+/streamlit/machinelearningenv/
+/langchain/langchainenv/
+/*.pyc
 __pycache__/
-langchainenv/
-.env
+langchain/.env
