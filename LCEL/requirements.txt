@@ -32,3 +32,5 @@ numexpr
 huggingface_hub
 fastapi
 uvicorn
+langserve
+sse_starlette
