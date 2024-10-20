@@ -3,3 +3,5 @@
 /*.pyc
 __pycache__/
 langchain/.env
+/LCEL/lcelenv
+LCEL/.env
