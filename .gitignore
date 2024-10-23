@@ -1,7 +1,9 @@
 /streamlit/machinelearningenv/
 /langchain/langchainenv/
+/genai-projects/chatbotenv
 /*.pyc
 __pycache__/
 langchain/.env
 /LCEL/lcelenv
 LCEL/.env
+genai-projects/.env
