@@ -7,3 +7,4 @@ langchain/.env
 /LCEL/lcelenv
 LCEL/.env
 genai-projects/.env
+genai-projects/ollama-chatbot/.env
