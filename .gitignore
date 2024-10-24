@@ -1,10 +1,10 @@
 /streamlit/machinelearningenv/
 /langchain/langchainenv/
-/genai-projects/chatbotenv
+/simple-chatbot-projects/chatbotenv
 /*.pyc
 __pycache__/
 langchain/.env
 /LCEL/lcelenv
 LCEL/.env
-genai-projects/.env
-genai-projects/ollama-chatbot/.env
+simple-chatbot-projects/openai-chatbot/.env
+simple-chatbot-projects/ollama-chatbot/.env
