@@ -1,10 +1,17 @@
+##virtual envs
 /streamlit/machinelearningenv/
 /langchain/langchainenv/
 /simple-chatbot-projects/chatbotenv
+/LCEL/lcelenv
+simple-rag-project/ragenv
+
 /*.pyc
 __pycache__/
+
+
+##Env files
 langchain/.env
-/LCEL/lcelenv
 LCEL/.env
 simple-chatbot-projects/openai-chatbot/.env
 simple-chatbot-projects/ollama-chatbot/.env
+simple-rag-project/.env

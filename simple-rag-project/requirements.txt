@@ -4,4 +4,8 @@ python-dotenv
 langchain_community
 langchain_core
 streamlit
-flask
+sentence_transformers
+langchain_huggingface
+chromadb
+duckdb
+langchain-groq
